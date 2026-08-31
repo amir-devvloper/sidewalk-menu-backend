@@ -27,8 +27,12 @@ app.get("/", (req, res) => {
 
 // مسیر محصولات
 const productRoutes = require("./routes/products");
-
 app.use("/api/products", productRoutes);
+
+
+// مسیر ادمین
+const adminRoutes = require("./routes/admin");
+app.use("/api/admin", adminRoutes.router);
 
 
 const PORT = 5000;
