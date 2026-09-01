@@ -30,6 +30,11 @@ const productRoutes = require("./routes/products");
 app.use("/api/products", productRoutes);
 
 
+// مسیر سفارش‌ها
+const orderRoutes = require("./routes/orders");
+app.use("/api/orders", orderRoutes);
+
+
 // مسیر ادمین
 const adminRoutes = require("./routes/admin");
 app.use("/api/admin", adminRoutes.router);
