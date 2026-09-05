@@ -1,9 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const supabase = require("../supabase");
-const verifyAdmin = require("../middleware/auth");
 
-// گرفتن همه محصولات (عمومی - برای منوی مشتری هم لازمه)
+// گرفتن همه محصولات
 router.get("/", async (req, res) => {
     try {
         const { data, error } = await supabase
@@ -16,25 +15,25 @@ router.get("/", async (req, res) => {
         }
 
         const products = data.map(product => ({
-            _id: product.id,
-            name: product.name,
-            category: product.category,
-            description: product.description,
-            price: product.price,
-            image: product.image,
-            available: product.available,
-            createdAt: product.created_at,
-            updatedAt: product.updated_at
-        }));
+    _id: product.id,
+    name: product.name,
+    category: product.category,
+    description: product.description,
+    price: product.price,
+    image: product.image,
+    available: product.available,
+    createdAt: product.created_at,
+    updatedAt: product.updated_at
+}));
 
-        res.json(products);
+res.json(products);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
-// اضافه کردن محصول (فقط ادمین)
-router.post("/", verifyAdmin, async (req, res) => {
+// اضافه کردن محصول
+router.post("/", async (req, res) => {
     try {
         const { data, error } = await supabase
             .from("products")
@@ -52,8 +51,8 @@ router.post("/", verifyAdmin, async (req, res) => {
     }
 });
 
-// ویرایش محصول (فقط ادمین)
-router.put("/:id", verifyAdmin, async (req, res) => {
+// ویرایش محصول
+router.put("/:id", async (req, res) => {
     try {
         const { data, error } = await supabase
             .from("products")
@@ -72,8 +71,8 @@ router.put("/:id", verifyAdmin, async (req, res) => {
     }
 });
 
-// حذف محصول (فقط ادمین)
-router.delete("/:id", verifyAdmin, async (req, res) => {
+// حذف محصول
+router.delete("/:id", async (req, res) => {
     try {
         const { error } = await supabase
             .from("products")
