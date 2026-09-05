@@ -1,7 +1,9 @@
 const express = require("express");
 const router = express.Router();
+const jwt = require("jsonwebtoken");
 
 const supabase = require("../supabase");
+const verifyAdmin = require("../middleware/auth");
 
 // =====================
 // ADMIN LOGIN
@@ -14,9 +16,15 @@ router.post("/login", (req, res) => {
         username === process.env.ADMIN_USERNAME &&
         password === process.env.ADMIN_PASSWORD
     ) {
+        const token = jwt.sign(
+            { username },
+            process.env.JWT_SECRET,
+            { expiresIn: "7d" }
+        );
+
         return res.json({
             success: true,
-            token: "test-token-123"
+            token
         });
     }
 
@@ -27,10 +35,21 @@ router.post("/login", (req, res) => {
 });
 
 // =====================
+// CHECK SESSION (برای checkExistingSession توی فرانت)
+// =====================
+
+router.get("/me", verifyAdmin, (req, res) => {
+    res.json({
+        success: true,
+        admin: req.admin
+    });
+});
+
+// =====================
 // GET ALL REQUESTS
 // =====================
 
-router.get("/requests", async (req, res) => {
+router.get("/requests", verifyAdmin, async (req, res) => {
     try {
         const { data, error } = await supabase
             .from("requests")
@@ -61,7 +80,7 @@ router.get("/requests", async (req, res) => {
 // CHANGE STATUS
 // =====================
 
-router.put("/requests/:trackingCode/status", async (req, res) => {
+router.put("/requests/:trackingCode/status", verifyAdmin, async (req, res) => {
     try {
         const { data, error } = await supabase
             .from("requests")
@@ -97,7 +116,7 @@ router.put("/requests/:trackingCode/status", async (req, res) => {
 // DELETE REQUEST
 // =====================
 
-router.delete("/requests/:trackingCode", async (req, res) => {
+router.delete("/requests/:trackingCode", verifyAdmin, async (req, res) => {
     try {
         const { data, error } = await supabase
             .from("requests")
