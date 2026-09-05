@@ -17,6 +17,9 @@ router.post("/", async (req, res) => {
             customerName,
             tableNumber,
             customerPhone,
+            deliveryMethod,
+            address,
+            pickupEta,
             items
         } = req.body;
 
@@ -28,6 +31,37 @@ if (
             return res.status(400).json({
                 success: false,
                 message: "اطلاعات سفارش کامل نیست."
+            });
+        }
+
+        const allowedMethods = [
+            "restaurant",
+            "delivery",
+            "pickup"
+        ];
+
+        const cleanDeliveryMethod =
+            allowedMethods.includes(deliveryMethod)
+                ? deliveryMethod
+                : "restaurant";
+
+        if (
+            cleanDeliveryMethod === "delivery" &&
+            !address
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "آدرس ارسال وارد نشده است."
+            });
+        }
+
+        if (
+            cleanDeliveryMethod === "pickup" &&
+            !pickupEta
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "زمان تحویل حضوری وارد نشده است."
             });
         }
 
@@ -72,6 +106,13 @@ if (
                     customer_phone: customerPhone
                         ? String(customerPhone).trim()
                         : "",
+                    delivery_method: cleanDeliveryMethod,
+                    address: address
+                        ? String(address).trim()
+                        : "",
+                    pickup_eta: pickupEta
+                        ? String(pickupEta).trim()
+                        : "",
                     items: cleanItems,
                     total
                 }
@@ -97,6 +138,9 @@ res.status(201).json({
         customerName: data.customer_name,
         tableNumber: data.table_number,
         customerPhone: data.customer_phone,
+        deliveryMethod: data.delivery_method,
+        address: data.address,
+        pickupEta: data.pickup_eta,
         items: data.items,
         total: data.total,
         status: data.status,
@@ -136,6 +180,9 @@ const orders = data.map(order => ({
     customerName: order.customer_name,
     tableNumber: order.table_number,
     customerPhone: order.customer_phone,
+    deliveryMethod: order.delivery_method,
+    address: order.address,
+    pickupEta: order.pickup_eta,
     items: order.items,
     total: order.total,
     status: order.status,
