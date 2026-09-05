@@ -1,140 +1,136 @@
 const express = require("express");
 const router = express.Router();
 
-const Request = require("../models/Request");
-
+const supabase = require("../supabase");
 
 // =====================
 // ADMIN LOGIN
 // =====================
 
 router.post("/login", (req, res) => {
-
     const { username, password } = req.body;
 
     if (
         username === process.env.ADMIN_USERNAME &&
         password === process.env.ADMIN_PASSWORD
     ) {
-
         return res.json({
             success: true,
             token: "test-token-123"
         });
-
     }
-
 
     res.status(401).json({
         success: false,
         message: "رمز یا نام کاربری اشتباه است"
     });
-
 });
-
-
 
 // =====================
 // GET ALL REQUESTS
 // =====================
 
 router.get("/requests", async (req, res) => {
-
     try {
+        const { data, error } = await supabase
+            .from("requests")
+            .select("*")
+            .order("created_at", { ascending: false });
 
-        const requests = await Request.find()
-            .sort({ createdAt: -1 });
-
+        if (error) {
+            return res.status(500).json({
+                success: false,
+                message: error.message
+            });
+        }
 
         res.json({
             success: true,
-            requests
+            requests: data
         });
 
-
-    } catch(error) {
-
+    } catch (error) {
         res.status(500).json({
-            success:false,
-            message:error.message
+            success: false,
+            message: error.message
         });
-
     }
-
 });
-
-
 
 // =====================
 // CHANGE STATUS
 // =====================
 
-router.put("/requests/:trackingCode/status", async (req,res)=>{
-
+router.put("/requests/:trackingCode/status", async (req, res) => {
     try {
+        const { data, error } = await supabase
+            .from("requests")
+            .update({
+                status: req.body.status,
+                updated_at: new Date().toISOString()
+            })
+            .eq("tracking_code", req.params.trackingCode)
+            .select()
+            .single();
 
-        const updated = await Request.findOneAndUpdate(
-            {
-                trackingCode:req.params.trackingCode
-            },
-            {
-                status:req.body.status
-            },
-            {
-                new:true
-            }
-        );
-
+        if (error || !data) {
+            return res.status(404).json({
+                success: false,
+                message: "درخواست پیدا نشد."
+            });
+        }
 
         res.json({
-            success:true,
-            request:updated
+            success: true,
+            request: data
         });
 
-
-    } catch(error){
-
+    } catch (error) {
         res.status(500).json({
-            success:false,
-            message:error.message
+            success: false,
+            message: error.message
         });
-
     }
-
 });
-
-
 
 // =====================
 // DELETE REQUEST
 // =====================
 
-router.delete("/requests/:trackingCode", async(req,res)=>{
+router.delete("/requests/:trackingCode", async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from("requests")
+            .delete()
+            .eq("tracking_code", req.params.trackingCode)
+            .select();
 
-    try{
+        if (error) {
+            return res.status(500).json({
+                success: false,
+                message: error.message
+            });
+        }
 
-        await Request.findOneAndDelete({
-            trackingCode:req.params.trackingCode
-        });
-
+        if (!data || data.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "درخواست پیدا نشد."
+            });
+        }
 
         res.json({
-            success:true,
-            message:"Deleted"
+            success: true,
+            message: "Deleted"
         });
 
-
-    }catch(error){
-
+    } catch (error) {
         res.status(500).json({
-            success:false,
-            message:error.message
+            success: false,
+            message: error.message
         });
-
     }
-
 });
-
 
 module.exports = {
     router
