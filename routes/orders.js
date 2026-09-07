@@ -203,6 +203,49 @@ res.json({
     }
 });
 
+// دریافت یک سفارش با کد سفارش (برای صفحهٔ پیگیری سفارش)
+router.get("/:orderCode", async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from("orders")
+            .select("*")
+            .eq("order_code", req.params.orderCode)
+            .single();
+
+        if (error || !data) {
+            return res.status(404).json({
+                success: false,
+                message: "سفارش پیدا نشد."
+            });
+        }
+
+        res.json({
+            success: true,
+            order: {
+                _id: data.id,
+                orderCode: data.order_code,
+                customerName: data.customer_name,
+                tableNumber: data.table_number,
+                customerPhone: data.customer_phone,
+                deliveryMethod: data.delivery_method,
+                address: data.address,
+                pickupEta: data.pickup_eta,
+                items: data.items,
+                total: data.total,
+                status: data.status,
+                createdAt: data.created_at,
+                updatedAt: data.updated_at
+            }
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message
+        });
+    }
+});
+
 // تغییر وضعیت سفارش
 router.put("/:orderCode/status", async (req, res) => {
     try {
