@@ -8,6 +8,10 @@ const MAX_NAME = 120;
 const MAX_DESCRIPTION = 1000;
 const MAX_IMAGE = 1000;
 
+function todayDateString() {
+    return new Date().toISOString().slice(0, 10);
+}
+
 function sanitizeProductInput(body = {}) {
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const category = typeof body.category === "string" ? body.category.trim() : "";
@@ -31,6 +35,12 @@ function sanitizeProductInput(body = {}) {
 }
 
 function mapProduct(product) {
+    const today = todayDateString();
+    // "sold_out_date" marks a product as unavailable only for the day it
+    // was set — it stops applying automatically once the date rolls over,
+    // no separate reset step needed. "available" is the permanent switch.
+    const soldOutToday = Boolean(product.sold_out_date) && product.sold_out_date === today;
+
     return {
         _id: product.id,
         name: product.name,
@@ -39,6 +49,8 @@ function mapProduct(product) {
         price: product.price,
         image: product.image,
         available: product.available,
+        soldOutToday,
+        availableNow: product.available && !soldOutToday,
         createdAt: product.created_at,
         updatedAt: product.updated_at
     };
@@ -84,6 +96,37 @@ router.post("/", async (req, res) => {
         return res.status(201).json(mapProduct(data));
     } catch (error) {
         return res.status(400).json({ success: false, message: error.message });
+    }
+});
+
+// Quick end-of-day toggle: mark a product sold out for *today only*,
+// without touching its permanent "available" flag. Clears itself the
+// next day automatically since it's compared against the current date.
+router.patch("/:id/sold-out-today", async (req, res) => {
+    try {
+        const id = String(req.params.id || "").trim();
+        if (!/^[0-9a-f-]{20,}$/i.test(id)) {
+            return res.status(400).json({ success: false, message: "شناسه محصول نامعتبر است." });
+        }
+
+        const soldOut = Boolean(req.body?.soldOut);
+        const soldOutDate = soldOut ? todayDateString() : null;
+
+        const { data, error } = await supabase
+            .from("products")
+            .update({ sold_out_date: soldOutDate })
+            .eq("id", id)
+            .select()
+            .single();
+
+        if (error || !data) {
+            return res.status(404).json({ success: false, message: "محصول پیدا نشد." });
+        }
+
+        return res.json(mapProduct(data));
+    } catch (error) {
+        console.error("Sold-out-today toggle error:", error.message);
+        return res.status(500).json({ success: false, message: "تغییر وضعیت موجودی امروز انجام نشد." });
     }
 });
 

@@ -112,6 +112,174 @@ router.get("/me", verifyAdmin, (req, res) => {
 
 router.use(verifyAdmin);
 
+// ---------------------------------------------------------------------------
+// Reports
+// ---------------------------------------------------------------------------
+
+function parseDateParam(value, fallback) {
+    if (!value) return fallback;
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? fallback : parsed;
+}
+
+function bucketKey(date, group) {
+    const d = new Date(date);
+    if (group === "month") {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    }
+    if (group === "week") {
+        // ISO-ish week bucket: Saturday-start week to match the local work week.
+        const weekStart = new Date(d);
+        const dayIndex = (weekStart.getDay() + 1) % 7; // شنبه = 0
+        weekStart.setDate(weekStart.getDate() - dayIndex);
+        return weekStart.toISOString().slice(0, 10);
+    }
+    return d.toISOString().slice(0, 10); // day
+}
+
+// Aggregated sales report: totals, averages, a time series bucketed by
+// day/week/month, best-selling products, and a breakdown by order type.
+router.get("/reports", async (req, res) => {
+    try {
+        const group = ["day", "week", "month"].includes(req.query.group) ? req.query.group : "day";
+        const to = parseDateParam(req.query.to, new Date());
+        const from = parseDateParam(
+            req.query.from,
+            new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000)
+        );
+
+        const { data, error } = await supabase
+            .from("orders")
+            .select("order_code,items,total,status,delivery_method,created_at")
+            .gte("created_at", from.toISOString())
+            .lte("created_at", to.toISOString())
+            .order("created_at", { ascending: true })
+            .limit(5000);
+
+        if (error) {
+            console.error("Reports error:", error.message);
+            return res.status(500).json({ success: false, message: "خطا در تهیه گزارش." });
+        }
+
+        const orders = data || [];
+        const activeOrders = orders.filter(order => order.status !== "لغو شد");
+
+        const totalOrders = activeOrders.length;
+        const totalSales = activeOrders.reduce((sum, o) => sum + Number(o.total || 0), 0);
+        const averageOrder = totalOrders ? Math.round(totalSales / totalOrders) : 0;
+
+        const byBucket = new Map();
+        for (const order of activeOrders) {
+            const key = bucketKey(order.created_at, group);
+            const entry = byBucket.get(key) || { bucket: key, orders: 0, sales: 0 };
+            entry.orders += 1;
+            entry.sales += Number(order.total || 0);
+            byBucket.set(key, entry);
+        }
+        const series = [...byBucket.values()].sort((a, b) => a.bucket.localeCompare(b.bucket));
+
+        const byDeliveryMethod = { restaurant: 0, delivery: 0, pickup: 0 };
+        const byDeliveryMethodSales = { restaurant: 0, delivery: 0, pickup: 0 };
+        for (const order of activeOrders) {
+            const method = byDeliveryMethod.hasOwnProperty(order.delivery_method) ? order.delivery_method : "restaurant";
+            byDeliveryMethod[method] += 1;
+            byDeliveryMethodSales[method] += Number(order.total || 0);
+        }
+
+        const productStats = new Map();
+        for (const order of activeOrders) {
+            for (const item of order.items || []) {
+                const key = item.productId || item.name;
+                const entry = productStats.get(key) || { name: item.name, quantity: 0, revenue: 0 };
+                entry.quantity += Number(item.quantity || 0);
+                entry.revenue += Number(item.price || 0) * Number(item.quantity || 0);
+                productStats.set(key, entry);
+            }
+        }
+        const topProducts = [...productStats.values()]
+            .sort((a, b) => b.quantity - a.quantity)
+            .slice(0, 10);
+
+        const cancelledCount = orders.length - activeOrders.length;
+
+        return res.json({
+            success: true,
+            report: {
+                from: from.toISOString(),
+                to: to.toISOString(),
+                group,
+                totalOrders,
+                totalSales,
+                averageOrder,
+                cancelledCount,
+                series,
+                byDeliveryMethod,
+                byDeliveryMethodSales,
+                topProducts
+            }
+        });
+    } catch (error) {
+        console.error("Reports error:", error.message);
+        return res.status(500).json({ success: false, message: "خطا در تهیه گزارش." });
+    }
+});
+
+function csvEscape(value) {
+    const text = String(value ?? "");
+    if (/[",\n]/.test(text)) {
+        return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+}
+
+// CSV export of raw orders in range, for spreadsheets. Requires the same
+// admin auth as everything else on this router (sent as a normal
+// Authorization header, not a bare link, since this is sensitive data).
+router.get("/reports/export.csv", async (req, res) => {
+    try {
+        const to = parseDateParam(req.query.to, new Date());
+        const from = parseDateParam(
+            req.query.from,
+            new Date(to.getTime() - 30 * 24 * 60 * 60 * 1000)
+        );
+
+        const { data, error } = await supabase
+            .from("orders")
+            .select("order_code,customer_name,customer_phone,table_number,delivery_method,items,total,status,created_at")
+            .gte("created_at", from.toISOString())
+            .lte("created_at", to.toISOString())
+            .order("created_at", { ascending: true })
+            .limit(5000);
+
+        if (error) {
+            console.error("CSV export error:", error.message);
+            return res.status(500).json({ success: false, message: "خطا در خروجی CSV." });
+        }
+
+        const header = ["کد سفارش", "تاریخ", "مشتری", "موبایل", "میز", "نوع سفارش", "اقلام", "جمع کل", "وضعیت"];
+        const rows = (data || []).map(order => [
+            order.order_code,
+            order.created_at,
+            order.customer_name,
+            order.customer_phone,
+            order.table_number,
+            order.delivery_method,
+            (order.items || []).map(item => `${item.name} x${item.quantity}`).join(" | "),
+            order.total,
+            order.status
+        ]);
+
+        const csv = [header, ...rows].map(row => row.map(csvEscape).join(",")).join("\n");
+
+        res.set("Content-Type", "text/csv; charset=utf-8");
+        res.set("Content-Disposition", `attachment; filename="orders-report.csv"`);
+        return res.send(`\uFEFF${csv}`); // BOM so Excel opens Persian text correctly.
+    } catch (error) {
+        console.error("CSV export error:", error.message);
+        return res.status(500).json({ success: false, message: "خطا در خروجی CSV." });
+    }
+});
+
 router.get("/requests", async (req, res) => {
     try {
         const { data, error } = await supabase

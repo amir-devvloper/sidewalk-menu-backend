@@ -4,13 +4,20 @@ const router = express.Router();
 const supabase = require("../supabase");
 const { verifyAdmin } = require("../middleware/auth");
 
+// More granular pipeline: جدید -> در حال آماده‌سازی -> آماده شد ->
+// (در حال ارسال فقط برای پیک) -> تحویل شد, یا لغو شد در هر مرحله.
 const ORDER_STATUSES = [
     "جدید",
     "در حال آماده‌سازی",
     "آماده شد",
+    "در حال ارسال",
     "تحویل شد",
     "لغو شد"
 ];
+// Statuses the customer is still allowed to self-cancel from, and the
+// time window (ms) after order creation during which cancellation is allowed.
+const CUSTOMER_CANCELLABLE_STATUSES = new Set(["جدید"]);
+const CUSTOMER_CANCEL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 const DELIVERY_METHODS = new Set(["restaurant", "delivery", "pickup"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -49,6 +56,7 @@ function mapOrder(order, { publicView = false } = {}) {
         return {
             orderCode: order.order_code,
             status: order.status,
+            deliveryMethod: order.delivery_method,
             createdAt: order.created_at,
             updatedAt: order.updated_at
         };
@@ -144,6 +152,86 @@ function validateOrderBody(body = {}) {
     };
 }
 
+// Looks up products for a quantityByProduct map, checks availability, and
+// returns priced order items + total. Shared by the public checkout and
+// the admin manual-order endpoint so prices always come from the database.
+async function resolveOrderItems(quantityByProduct) {
+    const productIds = [...quantityByProduct.keys()];
+
+    const { data: products, error: productError } = await supabase
+        .from("products")
+        .select("id,name,price,available,sold_out_date")
+        .in("id", productIds);
+
+    if (productError) {
+        console.error("Order product lookup error:", productError.message);
+        return { error: "خطا در بررسی محصولات سفارش.", status: 500 };
+    }
+
+    if (!products || products.length !== productIds.length) {
+        return { error: "یکی از محصولات دیگر وجود ندارد.", status: 400 };
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const productMap = new Map(products.map(product => [product.id, product]));
+    const unavailable = products.find(
+        product => product.available === false || product.sold_out_date === today
+    );
+    if (unavailable) {
+        return {
+            error: `محصول «${unavailable.name}» در حال حاضر ناموجود است.`,
+            status: 409
+        };
+    }
+
+    const items = productIds.map(productId => {
+        const product = productMap.get(productId);
+        const quantity = quantityByProduct.get(productId);
+        return {
+            productId: product.id,
+            name: product.name,
+            price: Number(product.price),
+            quantity
+        };
+    });
+
+    const total = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+    if (!Number.isSafeInteger(total) || total < 0 || total > 10000000000) {
+        return { error: "مبلغ سفارش نامعتبر است.", status: 400 };
+    }
+
+    return { items, total };
+}
+
+async function insertOrder({ customerName, tableNumber, customerPhone, deliveryMethod, address, pickupEta, items, total }) {
+    let data = null;
+    let insertError = null;
+    for (let attempt = 0; attempt < 3 && !data; attempt += 1) {
+        const orderCode = makeOrderCode();
+        const result = await supabase
+            .from("orders")
+            .insert([{
+                order_code: orderCode,
+                customer_name: customerName,
+                table_number: tableNumber,
+                customer_phone: customerPhone,
+                delivery_method: deliveryMethod,
+                address,
+                pickup_eta: pickupEta,
+                items,
+                total
+            }])
+            .select()
+            .single();
+        data = result.data;
+        insertError = result.error;
+
+        if (insertError && insertError.code !== "23505") break;
+    }
+
+    return { data, insertError };
+}
+
 // Customer creates an order. Prices/names come from the database, never the browser.
 router.post("/", async (req, res) => {
     try {
@@ -153,71 +241,16 @@ router.post("/", async (req, res) => {
         }
 
         const { quantityByProduct, ...customer } = validation.value;
-        const productIds = [...quantityByProduct.keys()];
-
-        const { data: products, error: productError } = await supabase
-            .from("products")
-            .select("id,name,price,available")
-            .in("id", productIds);
-
-        if (productError) {
-            console.error("Order product lookup error:", productError.message);
-            return res.status(500).json({ success: false, message: "خطا در بررسی محصولات سفارش." });
+        const resolved = await resolveOrderItems(quantityByProduct);
+        if (resolved.error) {
+            return res.status(resolved.status).json({ success: false, message: resolved.error });
         }
 
-        if (!products || products.length !== productIds.length) {
-            return res.status(400).json({ success: false, message: "یکی از محصولات دیگر وجود ندارد." });
-        }
-
-        const productMap = new Map(products.map(product => [product.id, product]));
-        const unavailable = products.find(product => product.available === false);
-        if (unavailable) {
-            return res.status(409).json({
-                success: false,
-                message: `محصول «${unavailable.name}" در حال حاضر ناموجود است.`
-            });
-        }
-
-        const cleanItems = productIds.map(productId => {
-            const product = productMap.get(productId);
-            const quantity = quantityByProduct.get(productId);
-            return {
-                productId: product.id,
-                name: product.name,
-                price: Number(product.price),
-                quantity
-            };
+        const { data, insertError } = await insertOrder({
+            ...customer,
+            items: resolved.items,
+            total: resolved.total
         });
-
-        const total = cleanItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
-        if (!Number.isSafeInteger(total) || total < 0 || total > 10000000000) {
-            return res.status(400).json({ success: false, message: "مبلغ سفارش نامعتبر است." });
-        }
-
-        let data = null;
-        let insertError = null;
-        for (let attempt = 0; attempt < 3 && !data; attempt += 1) {
-            const orderCode = makeOrderCode();
-            const result = await supabase
-                .from("orders")
-                .insert([{
-                    order_code: orderCode,
-                    customer_name: customer.customerName,
-                    table_number: customer.tableNumber,
-                    customer_phone: customer.customerPhone,
-                    delivery_method: customer.deliveryMethod,
-                    address: customer.address,
-                    pickup_eta: customer.pickupEta,
-                    items: cleanItems,
-                    total
-                }])
-                .select()
-                .single();
-            data = result.data;
-            insertError = result.error;
-
-            if (insertError && insertError.code !== "23505") break;
-        }
 
         if (insertError || !data) {
             console.error("Order insert error:", insertError?.message);
@@ -235,6 +268,88 @@ router.post("/", async (req, res) => {
     }
 });
 
+// Public order-history endpoint for a returning customer. Scoped strictly
+// to their own phone number — this is the same identifier they already
+// typed in at checkout, never another customer's data.
+router.get("/history/:phone", async (req, res) => {
+    try {
+        const phone = normalizePhone(req.params.phone);
+        if (!phone) {
+            return res.status(400).json({ success: false, message: "شماره موبایل نامعتبر است." });
+        }
+
+        const { data, error } = await supabase
+            .from("orders")
+            .select("id,order_code,items,total,status,delivery_method,table_number,created_at,updated_at")
+            .eq("customer_phone", phone)
+            .order("created_at", { ascending: false })
+            .limit(20);
+
+        if (error) {
+            console.error("Order history error:", error.message);
+            return res.status(500).json({ success: false, message: "خطا در دریافت تاریخچه سفارش‌ها." });
+        }
+
+        return res.json({ success: true, orders: (data || []).map(order => mapOrder(order)) });
+    } catch (error) {
+        console.error("Order history error:", error.message);
+        return res.status(500).json({ success: false, message: "خطا در دریافت تاریخچه سفارش‌ها." });
+    }
+});
+
+// Customer self-cancel, only while the order is still new and inside the
+// cancellation window. Requires the same phone number used at checkout so
+// a stranger who only knows the order code can't cancel someone's order.
+router.post("/:orderCode/cancel", async (req, res) => {
+    try {
+        const orderCode = cleanString(req.params.orderCode, 40);
+        const phone = normalizePhone(req.body?.customerPhone);
+
+        if (!/^SW-[A-Z0-9]+-[A-Z0-9]+$/i.test(orderCode) || !phone) {
+            return res.status(400).json({ success: false, message: "درخواست نامعتبر است." });
+        }
+
+        const { data: existing, error: fetchError } = await supabase
+            .from("orders")
+            .select("id,order_code,status,customer_phone,created_at")
+            .eq("order_code", orderCode)
+            .maybeSingle();
+
+        if (fetchError || !existing) {
+            return res.status(404).json({ success: false, message: "سفارش پیدا نشد." });
+        }
+
+        if (existing.customer_phone !== phone) {
+            return res.status(403).json({ success: false, message: "شماره موبایل با سفارش مطابقت ندارد." });
+        }
+
+        if (!CUSTOMER_CANCELLABLE_STATUSES.has(existing.status)) {
+            return res.status(409).json({ success: false, message: "این سفارش دیگر قابل لغو نیست، آماده‌سازی آن شروع شده است." });
+        }
+
+        const ageMs = Date.now() - new Date(existing.created_at).getTime();
+        if (!Number.isFinite(ageMs) || ageMs > CUSTOMER_CANCEL_WINDOW_MS) {
+            return res.status(409).json({ success: false, message: "زمان مجاز برای لغو سفارش به پایان رسیده است." });
+        }
+
+        const { data, error } = await supabase
+            .from("orders")
+            .update({ status: "لغو شد", updated_at: new Date().toISOString() })
+            .eq("order_code", orderCode)
+            .select()
+            .single();
+
+        if (error || !data) {
+            return res.status(500).json({ success: false, message: "لغو سفارش انجام نشد." });
+        }
+
+        return res.json({ success: true, message: "سفارش با موفقیت لغو شد.", order: mapOrder(data, { publicView: true }) });
+    } catch (error) {
+        console.error("Order cancel error:", error.message);
+        return res.status(500).json({ success: false, message: "لغو سفارش انجام نشد." });
+    }
+});
+
 // Public tracking endpoint. Do not expose customer PII.
 router.get("/:orderCode", async (req, res) => {
     try {
@@ -245,7 +360,7 @@ router.get("/:orderCode", async (req, res) => {
 
         const { data, error } = await supabase
             .from("orders")
-            .select("id,order_code,items,total,status,created_at,updated_at")
+            .select("id,order_code,items,total,status,delivery_method,created_at,updated_at")
             .eq("order_code", orderCode)
             .maybeSingle();
 
@@ -262,6 +377,85 @@ router.get("/:orderCode", async (req, res) => {
 
 // Admin-only routes from this point onward.
 router.use(verifyAdmin);
+
+// Manual order entry from the admin panel (e.g. a walk-in customer taken
+// by staff, without going through the customer-facing site). Phone number
+// is optional here; everything else still goes through the same
+// availability/price checks as a normal order.
+function validateManualOrderBody(body = {}) {
+    const customerName = cleanString(body.customerName, 100) || "مشتری حضوری";
+    const customerPhone = normalizePhone(body.customerPhone);
+    const tableNumber = cleanString(body.tableNumber, 20);
+    const deliveryMethod = cleanString(body.deliveryMethod, 20) || "restaurant";
+    const address = cleanString(body.address, 1000);
+    const pickupEta = cleanString(body.pickupEta, 50);
+    const items = Array.isArray(body.items) ? body.items : [];
+
+    if (!DELIVERY_METHODS.has(deliveryMethod)) {
+        return { error: "روش تحویل نامعتبر است." };
+    }
+
+    if (items.length < 1 || items.length > 50) {
+        return { error: "تعداد محصولات سفارش نامعتبر است." };
+    }
+
+    const quantityByProduct = new Map();
+    for (const item of items) {
+        const productId = String(item?.productId || "").trim();
+        const quantity = Number(item?.quantity);
+        if (!UUID_RE.test(productId) || !Number.isInteger(quantity) || quantity < 1 || quantity > 50) {
+            return { error: "اطلاعات یکی از محصولات نامعتبر است." };
+        }
+        quantityByProduct.set(productId, (quantityByProduct.get(productId) || 0) + quantity);
+    }
+
+    return {
+        value: {
+            customerName,
+            customerPhone,
+            tableNumber: deliveryMethod === "restaurant" ? tableNumber : "",
+            deliveryMethod,
+            address: deliveryMethod === "delivery" ? address : "",
+            pickupEta: deliveryMethod === "pickup" ? pickupEta : "",
+            quantityByProduct
+        }
+    };
+}
+
+router.post("/manual", async (req, res) => {
+    try {
+        const validation = validateManualOrderBody(req.body);
+        if (validation.error) {
+            return res.status(400).json({ success: false, message: validation.error });
+        }
+
+        const { quantityByProduct, ...customer } = validation.value;
+        const resolved = await resolveOrderItems(quantityByProduct);
+        if (resolved.error) {
+            return res.status(resolved.status).json({ success: false, message: resolved.error });
+        }
+
+        const { data, insertError } = await insertOrder({
+            ...customer,
+            items: resolved.items,
+            total: resolved.total
+        });
+
+        if (insertError || !data) {
+            console.error("Manual order insert error:", insertError?.message);
+            return res.status(500).json({ success: false, message: "خطا در ثبت سفارش دستی." });
+        }
+
+        return res.status(201).json({
+            success: true,
+            message: "سفارش دستی با موفقیت ثبت شد.",
+            order: mapOrder(data)
+        });
+    } catch (error) {
+        console.error("Manual order create error:", error.message);
+        return res.status(500).json({ success: false, message: "خطا در ثبت سفارش دستی." });
+    }
+});
 
 router.get("/", async (req, res) => {
     try {
