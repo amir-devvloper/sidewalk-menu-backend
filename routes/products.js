@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const supabase = require("../supabase");
-const { verifyAdmin, requireCsrf } = require("../middleware/auth");
+const { verifyAdmin } = require("../middleware/auth");
 
 const ALLOWED_CATEGORIES = new Set(["coffee", "drink", "food", "burger", "pizza", "dessert"]);
 const MAX_NAME = 120;
@@ -65,7 +65,7 @@ router.get("/", async (req, res) => {
 });
 
 // Everything below this point is admin-only.
-router.use(verifyAdmin, requireCsrf);
+router.use(verifyAdmin);
 
 router.post("/", async (req, res) => {
     try {

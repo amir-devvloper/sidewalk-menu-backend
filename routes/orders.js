@@ -2,7 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const router = express.Router();
 const supabase = require("../supabase");
-const { verifyAdmin, requireCsrf } = require("../middleware/auth");
+const { verifyAdmin } = require("../middleware/auth");
 
 const ORDER_STATUSES = [
     "جدید",
@@ -261,7 +261,7 @@ router.get("/:orderCode", async (req, res) => {
 });
 
 // Admin-only routes from this point onward.
-router.use(verifyAdmin, requireCsrf);
+router.use(verifyAdmin);
 
 router.get("/", async (req, res) => {
     try {
