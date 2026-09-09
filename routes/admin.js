@@ -4,7 +4,7 @@ const jwt = require("jsonwebtoken");
 
 const router = express.Router();
 const supabase = require("../supabase");
-const { verifyAdmin, requireCsrf, COOKIE_NAME, CSRF_COOKIE_NAME } = require("../middleware/auth");
+const { verifyAdmin } = require("../middleware/auth");
 
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "30m";
 const COOKIE_MAX_AGE_MS = 30 * 60 * 1000;
@@ -23,33 +23,6 @@ function verifyPassword(password, encoded) {
             resolve(expected.length === derivedKey.length && crypto.timingSafeEqual(expected, derivedKey));
         });
     });
-}
-
-function isProduction() {
-    return process.env.NODE_ENV === "production";
-}
-
-function cookieOptions() {
-    const configuredSameSite = String(process.env.COOKIE_SAMESITE || "lax").toLowerCase();
-    const sameSite = ["strict", "lax", "none"].includes(configuredSameSite)
-        ? configuredSameSite
-        : "lax";
-
-    return {
-        httpOnly: true,
-        secure: isProduction() || process.env.COOKIE_SECURE === "true",
-        sameSite,
-        maxAge: COOKIE_MAX_AGE_MS,
-        path: "/"
-    };
-}
-
-function csrfCookieOptions() {
-    const base = cookieOptions();
-    return {
-        ...base,
-        httpOnly: false
-    };
 }
 
 function requireAdminConfig() {
@@ -110,13 +83,9 @@ router.post("/login", async (req, res) => {
             }
         );
 
-        const csrfToken = crypto.randomBytes(32).toString("hex");
-
-        res.cookie(COOKIE_NAME, token, cookieOptions());
-        res.cookie(CSRF_COOKIE_NAME, csrfToken, csrfCookieOptions());
-
         return res.json({
             success: true,
+            token,
             expiresIn: JWT_EXPIRES_IN
         });
     } catch (error) {
@@ -128,10 +97,7 @@ router.post("/login", async (req, res) => {
     }
 });
 
-router.post("/logout", verifyAdmin, requireCsrf, (req, res) => {
-    const options = cookieOptions();
-    res.clearCookie(COOKIE_NAME, options);
-    res.clearCookie(CSRF_COOKIE_NAME, { ...options, httpOnly: false });
+router.post("/logout", verifyAdmin, (req, res) => {
     return res.json({ success: true });
 });
 
@@ -144,7 +110,7 @@ router.get("/me", verifyAdmin, (req, res) => {
     });
 });
 
-router.use(verifyAdmin, requireCsrf);
+router.use(verifyAdmin);
 
 router.get("/requests", async (req, res) => {
     try {
