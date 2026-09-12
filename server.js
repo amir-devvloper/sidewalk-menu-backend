@@ -50,7 +50,14 @@ app.use(cors({
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"]
 }));
-app.use(express.json({ limit: "100kb" }));
+app.use(express.json({
+    limit: "100kb",
+    verify(req, res, buffer) {
+        if (req.originalUrl?.startsWith("/api/orders/payment/webhook")) {
+            req.rawBody = Buffer.from(buffer);
+        }
+    }
+}));
 
 app.get("/", (req, res) => res.json({ success: true, message: "SIDE WALK API Running" }));
 app.get("/api/health", (req, res) => res.json({ success: true }));
@@ -96,7 +103,12 @@ app.use("/api/admin/login", loginLimiter);
 app.use("/api/admin", adminRoutes.router);
 app.use("/api/products", productRoutes);
 app.post("/api/orders", orderCreateLimiter);
-app.use("/api/orders", trackingLimiter);
+app.use("/api/orders", (req, res, next) => {
+    // Aban webhooks come from a shared server IP and must not be throttled by
+    // the customer tracking limiter; authenticity is enforced by HMAC + verify.
+    if (req.path === "/payment/webhook") return next();
+    return trackingLimiter(req, res, next);
+});
 app.use("/api/orders", orderRoutes);
 
 app.use((req, res) => {
