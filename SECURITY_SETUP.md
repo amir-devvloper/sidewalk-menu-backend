@@ -37,4 +37,4 @@ Any secret that has ever been committed or shared should be considered compromis
 
 ## Payment
 
-This repository does not contain a live payment gateway integration. Do not advertise the current order flow as successful online payment. Add the gateway only with server-side initialization, callback verification, transaction amount verification, replay protection, and idempotent order/payment state transitions.
+The Aban Gateway integration is server-side. The API token and webhook secret must be supplied only through server environment variables. Payment completion is accepted only after a signed webhook/manual server verification, invoice/order/amount matching, and idempotent paid-state handling. Never expose payment secrets in frontend files or commit them to Git.
