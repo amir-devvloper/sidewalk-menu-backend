@@ -557,8 +557,13 @@ router.post("/:orderCode/cancel", async (req, res) => {
 
         const { data, error } = await supabase
             .from("orders")
-            .update({ status: "لغو شد", updated_at: new Date().toISOString() })
+            .update({
+                status: "لغو شد",
+                payment_status: "cancelled",
+                updated_at: new Date().toISOString()
+            })
             .eq("order_code", orderCode)
+            .neq("payment_status", "paid")
             .select()
             .single();
 
@@ -576,6 +581,12 @@ router.post("/:orderCode/cancel", async (req, res) => {
 // Aban sends signed payment events to this server-to-server webhook.
 // We verify both the HMAC signature and the invoice via Aban before marking an order paid.
 router.post("/payment/webhook", async (req, res) => {
+    // --- TEMPORARY DEBUG LOGGING: remove once the cancel-webhook issue is diagnosed ---
+    console.log("=== Aban webhook received ===");
+    console.log("Headers:", JSON.stringify(req.headers));
+    console.log("Raw body:", req.rawBody ? req.rawBody.toString("utf8") : "(no rawBody captured)");
+    console.log("==============================");
+    // --- END TEMPORARY DEBUG LOGGING ---
     try {
         if (!ABAN_WEBHOOK_SECRET) {
             console.error("ABAN_WEBHOOK_SECRET is missing; refusing unsigned webhook processing.");
@@ -867,9 +878,34 @@ router.put("/:orderCode/status", async (req, res) => {
             return res.status(400).json({ success: false, message: "وضعیت نامعتبر است." });
         }
 
+        const updatePayload = { status, updated_at: new Date().toISOString() };
+
+        // When an admin cancels an order that was never actually paid, also
+        // close out the payment side so the panel doesn't keep showing
+        // "در انتظار پرداخت" forever. Never touch an already-paid invoice
+        // (a cancel on a paid order is a refund case, handled separately).
+        if (status === "لغو شد") {
+            const { data: current, error: fetchError } = await supabase
+                .from("orders")
+                .select("payment_status")
+                .eq("order_code", orderCode)
+                .maybeSingle();
+
+            if (fetchError) {
+                console.error("Order status lookup error:", fetchError.message);
+                return res.status(500).json({ success: false, message: "خطا در تغییر وضعیت سفارش." });
+            }
+            if (!current) {
+                return res.status(404).json({ success: false, message: "سفارش پیدا نشد." });
+            }
+            if (current.payment_status !== "paid") {
+                updatePayload.payment_status = "cancelled";
+            }
+        }
+
         const { data, error } = await supabase
             .from("orders")
-            .update({ status, updated_at: new Date().toISOString() })
+            .update(updatePayload)
             .eq("order_code", orderCode)
             .select()
             .single();
