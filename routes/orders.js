@@ -12,6 +12,7 @@ const ABAN_WEBHOOK_SECRET = String(process.env.ABAN_WEBHOOK_SECRET || "").trim()
 const BACKEND_PUBLIC_URL = String(process.env.BACKEND_PUBLIC_URL || "https://sidewalk-menu-backend.onrender.com").trim().replace(/\/$/, "");
 const ABAN_CALLBACK_URL = String(process.env.ABAN_CALLBACK_URL || `${BACKEND_PUBLIC_URL}/api/orders/payment/webhook`).trim();
 const ABAN_REQUEST_TIMEOUT_MS = Math.min(Math.max(Number(process.env.ABAN_REQUEST_TIMEOUT_MS || 12000), 3000), 30000);
+const RECONCILE_SECRET = String(process.env.RECONCILE_SECRET || "").trim();
 
 function getAbanErrorCode(payload) {
     return cleanString(payload?.error?.code || payload?.code, 100);
@@ -659,6 +660,66 @@ router.post("/payment/webhook", async (req, res) => {
             success: false,
             message: "پردازش وب‌هوک آبان ناموفق بود."
         });
+    }
+});
+
+// Fallback for the fact that Aban does not send a webhook when an invoice
+// is cancelled manually from inside the Aban dashboard (confirmed by testing —
+// it only calls back on payment success). Call this endpoint on a schedule
+// (e.g. an external cron hitting it every 10-15 minutes) with the shared
+// secret, and it will directly ask Aban about every still-"pending" order
+// and correct payment_status itself instead of waiting for a callback.
+router.post("/payment/reconcile", async (req, res) => {
+    try {
+        const providedSecret = cleanString(req.get("X-Reconcile-Secret") || req.query?.secret, 200);
+        if (!RECONCILE_SECRET) {
+            return res.status(503).json({ success: false, message: "RECONCILE_SECRET روی سرور تنظیم نشده است." });
+        }
+        if (!providedSecret || providedSecret !== RECONCILE_SECRET) {
+            return res.status(403).json({ success: false, message: "دسترسی غیرمجاز." });
+        }
+
+        const { data: pendingOrders, error } = await supabase
+            .from("orders")
+            .select("order_code,total,payment_invoice_id,payment_status")
+            .eq("payment_status", "pending")
+            .not("payment_invoice_id", "is", null)
+            .limit(200);
+
+        if (error) throw error;
+
+        const updated = [];
+        for (const order of pendingOrders || []) {
+            try {
+                const statusResponse = await getAbanInvoice(order.payment_invoice_id);
+                const payload = unwrapAbanInvoice(statusResponse);
+                const abanStatus = cleanString(payload?.status, 50);
+
+                if (abanStatus === "cancelled" || abanStatus === "expired") {
+                    await supabase
+                        .from("orders")
+                        .update({ payment_status: abanStatus })
+                        .eq("order_code", order.order_code)
+                        .neq("payment_status", "paid");
+                    updated.push({ orderCode: order.order_code, paymentStatus: abanStatus });
+                } else if (abanStatus === "paid") {
+                    await verifyAbanInvoiceForOrder(order, order.payment_invoice_id);
+                    await supabase
+                        .from("orders")
+                        .update({ payment_status: "paid", paid_at: new Date().toISOString() })
+                        .eq("order_code", order.order_code)
+                        .neq("payment_status", "paid");
+                    updated.push({ orderCode: order.order_code, paymentStatus: "paid" });
+                }
+            } catch (innerError) {
+                console.error("Reconcile order error:", order.order_code, innerError.message);
+            }
+        }
+
+        return res.json({ success: true, checked: (pendingOrders || []).length, updated });
+    } catch (error) {
+        console.error("Reconcile endpoint error:", error.message);
+        return res.status(500).json({ success: false, message: "خطا در همگام‌سازی وضعیت پرداخت‌ها." });
     }
 });
 
