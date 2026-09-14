@@ -264,7 +264,9 @@ router.get("/reports/export.csv", async (req, res) => {
             order.customer_phone,
             order.table_number,
             order.delivery_method,
-            (order.items || []).map(item => `${item.name} x${item.quantity}`).join(" | "),
+            (order.items || [])
+                .map(item => `${item.name} x${item.quantity}${item.note ? ` (یادداشت: ${item.note})` : ""}`)
+                .join(" | "),
             order.total,
             order.status
         ]);
