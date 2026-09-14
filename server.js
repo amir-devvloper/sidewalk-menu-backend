@@ -98,8 +98,10 @@ const trackingLimiter = createRateLimiter({
 const productRoutes = require("./routes/products");
 const orderRoutes = require("./routes/orders");
 const adminRoutes = require("./routes/admin");
+const discountRoutes = require("./routes/discounts");
 
 app.use("/api/admin/login", loginLimiter);
+app.use("/api/admin/discounts", discountRoutes);
 app.use("/api/admin", adminRoutes.router);
 app.use("/api/products", productRoutes);
 app.post("/api/orders", orderCreateLimiter);
