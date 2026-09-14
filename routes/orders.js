@@ -554,10 +554,19 @@ router.post("/", async (req, res) => {
             total: finalTotal
         });
 
-        if (insertError || !data) {
-            console.error("Order insert error:", insertError?.message);
-            return res.status(500).json({ success: false, message: "خطا در ثبت سفارش." });
-        }
+if (insertError || !data) {
+    console.error("Order insert error:", {
+        message: insertError?.message,
+        code: insertError?.code,
+        details: insertError?.details,
+        hint: insertError?.hint
+    });
+
+    return res.status(500).json({
+        success: false,
+        message: insertError?.message || "خطا در ثبت سفارش."
+    });
+}
 
         const orderCode = data.order_code;
 
@@ -630,9 +639,24 @@ router.post("/", async (req, res) => {
                 retryAfter: paymentError.retryAfter ?? null
             });
         }
-    } catch (error) {
-        console.error("Order create error:", error.message);
-        return res.status(500).json({ success: false, message: "خطا در ثبت سفارش." });
+        } catch (error) {
+        console.error("Order create error:", {
+            message: error?.message,
+            code: error?.code,
+            status: error?.status,
+            details: error?.details,
+            hint: error?.hint,
+            stack: error?.stack
+        });
+
+        return res.status(
+            error?.status >= 400 && error?.status < 600
+                ? error.status
+                : 500
+        ).json({
+            success: false,
+            message: error?.message || "خطا در ثبت سفارش."
+        });
     }
 });
 
