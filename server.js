@@ -53,7 +53,8 @@ app.use(cors({
 app.use(express.json({
     limit: "100kb",
     verify(req, res, buffer) {
-        if (req.originalUrl?.startsWith("/api/orders/payment/webhook")) {
+        if (req.originalUrl?.startsWith("/api/orders/payment/webhook") ||
+            req.originalUrl?.startsWith("/api/reservations/payment/webhook")) {
             req.rawBody = Buffer.from(buffer);
         }
     }
@@ -94,11 +95,16 @@ const trackingLimiter = createRateLimiter({
     windowMs: 5 * 60 * 1000, limit: 60,
     message: "تعداد درخواست‌های پیگیری بیش از حد مجاز است."
 });
+const reservationCreateLimiter = createRateLimiter({
+    windowMs: 10 * 60 * 1000, limit: 20,
+    message: "تعداد درخواست‌های رزرو بیش از حد مجاز است."
+});
 
 const productRoutes = require("./routes/products");
 const orderRoutes = require("./routes/orders");
 const adminRoutes = require("./routes/admin");
 const discountRoutes = require("./routes/discounts");
+const reservationRoutes = require("./routes/reservations");
 
 app.use("/api/admin/login", loginLimiter);
 app.use("/api/admin/discounts", discountRoutes);
@@ -112,6 +118,15 @@ app.use("/api/orders", (req, res, next) => {
     return trackingLimiter(req, res, next);
 });
 app.use("/api/orders", orderRoutes);
+
+app.post("/api/reservations", reservationCreateLimiter);
+app.use("/api/reservations", (req, res, next) => {
+    // Aban webhooks come from a shared server IP and must not be throttled;
+    // authenticity is enforced by HMAC signature verification instead.
+    if (req.path === "/payment/webhook") return next();
+    return trackingLimiter(req, res, next);
+});
+app.use("/api/reservations", reservationRoutes);
 
 app.use((req, res) => {
     res.status(404).json({ success: false, message: "مسیر پیدا نشد." });
