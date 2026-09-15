@@ -167,6 +167,11 @@ const ORDER_STATUSES = [
 // time window (ms) after order creation during which cancellation is allowed.
 const CUSTOMER_CANCELLABLE_STATUSES = new Set(["جدید"]);
 const CUSTOMER_CANCEL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+// How long after creating an order a customer can come back (e.g. they left
+// the payment gateway, closed the tab, or the connection dropped) and
+// continue the SAME order/invoice instead of the app forcing a brand new
+// order from scratch.
+const ORDER_RESUME_WINDOW_MS = 3 * 60 * 60 * 1000; // 3 hours
 const DELIVERY_METHODS = new Set(["restaurant", "delivery", "pickup"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // Free-text customization note the customer can attach to a cart line
@@ -767,6 +772,144 @@ router.post("/:orderCode/cancel", async (req, res) => {
     } catch (error) {
         console.error("Order cancel error:", error.message);
         return res.status(500).json({ success: false, message: "لغو سفارش انجام نشد." });
+    }
+});
+
+// Lets a customer who left the payment gateway (browser back, closed the
+// tab, a failed attempt, etc.) come back and continue the SAME order within
+// a short window, instead of the app forcing them to rebuild their cart and
+// checkout from zero. Requires the same phone number used at checkout, same
+// as the cancel endpoint above.
+router.post("/:orderCode/payment/resume", async (req, res) => {
+    try {
+        const orderCode = cleanString(req.params.orderCode, 40);
+        const phone = normalizePhone(req.body?.customerPhone);
+
+        if (!/^SW-[A-Z0-9]+-[A-Z0-9]+$/i.test(orderCode) || !phone) {
+            return res.status(400).json({ success: false, message: "درخواست نامعتبر است." });
+        }
+
+        const { data: order, error: fetchError } = await supabase
+            .from("orders")
+            .select("id,order_code,total,status,payment_status,payment_invoice_id,payment_url,customer_phone,created_at")
+            .eq("order_code", orderCode)
+            .maybeSingle();
+
+        if (fetchError || !order) {
+            return res.status(404).json({ success: false, message: "سفارش پیدا نشد." });
+        }
+
+        if (order.customer_phone !== phone) {
+            return res.status(403).json({ success: false, message: "شماره موبایل با سفارش مطابقت ندارد." });
+        }
+
+        if (order.payment_status === "paid") {
+            return res.json({ success: true, alreadyPaid: true, order: mapOrder(order, { publicView: true }) });
+        }
+
+        if (order.payment_status !== "pending") {
+            // cancelled / expired / never made it to the payment step.
+            return res.status(409).json({
+                success: false,
+                code: "order_not_resumable",
+                message: "این سفارش دیگر قابل ادامه نیست، لطفاً سفارش جدید ثبت کنید."
+            });
+        }
+
+        const ageMs = Date.now() - new Date(order.created_at).getTime();
+        if (!Number.isFinite(ageMs) || ageMs > ORDER_RESUME_WINDOW_MS) {
+            return res.status(409).json({
+                success: false,
+                code: "resume_window_expired",
+                message: "زمان مجاز برای ادامه‌ی این سفارش به پایان رسیده، لطفاً سفارش جدید ثبت کنید."
+            });
+        }
+
+        if (!ABAN_API_TOKEN) {
+            return res.status(503).json({ success: false, message: "درگاه Aban روی سرور تنظیم نشده است." });
+        }
+
+        // Ask Aban whether the invoice we already created is still open. If
+        // it is, hand back the exact same link — no need for a second
+        // invoice on the same order.
+        try {
+            if (order.payment_invoice_id) {
+                const status = await getAbanInvoice(order.payment_invoice_id);
+                const payload = unwrapAbanInvoice(status);
+
+                if (payload?.status === "paid") {
+                    // Aban already has it as paid but our webhook hasn't
+                    // landed yet — reflect that instead of restarting.
+                    await supabase
+                        .from("orders")
+                        .update({ payment_status: "paid", paid_at: new Date().toISOString() })
+                        .eq("order_code", orderCode)
+                        .neq("payment_status", "paid");
+                    return res.json({ success: true, alreadyPaid: true, order: mapOrder(order, { publicView: true }) });
+                }
+
+                if (payload?.status && payload.status !== "expired" && payload.status !== "cancelled" && order.payment_url) {
+                    return res.json({ success: true, payment: { paymentUrl: order.payment_url } });
+                }
+            }
+        } catch (checkError) {
+            console.error("Aban invoice status check (resume) error:", checkError.message);
+            // fall through and issue a fresh invoice below
+        }
+
+        // Old invoice is gone/expired at Aban's side but the order itself is
+        // still inside the resume window — issue a brand-new invoice for the
+        // SAME order instead of making the customer rebuild their cart.
+        try {
+            const invoiceResponse = await createAbanInvoice({ orderCode, totalToman: order.total });
+            const invoice = unwrapAbanInvoice(invoiceResponse);
+            const invoiceId = invoice?.invoice_id || invoice?.id;
+            const paymentUrl = invoice?.payment_url || invoice?.paymentUrl;
+
+            if (!invoiceId || !paymentUrl) {
+                const error = new Error("آبان گیت‌وی فاکتور ساخت اما لینک پرداخت معتبر برنگرداند.");
+                error.code = "aban_payment_url_missing";
+                throw error;
+            }
+
+            let parsedPaymentUrl;
+            try { parsedPaymentUrl = new URL(String(paymentUrl)); } catch (_) { parsedPaymentUrl = null; }
+            if (!parsedPaymentUrl || parsedPaymentUrl.protocol !== "https:" || !/(^|\.)abangateway\.ir$/i.test(parsedPaymentUrl.hostname)) {
+                const error = new Error("لینک پرداخت برگشتی آبان معتبر نیست.");
+                error.code = "aban_payment_url_invalid";
+                throw error;
+            }
+
+            const { error: updateError } = await supabase
+                .from("orders")
+                .update({
+                    payment_status: "pending",
+                    payment_invoice_id: String(invoiceId),
+                    payment_url: String(paymentUrl)
+                })
+                .eq("order_code", orderCode)
+                .neq("payment_status", "paid");
+
+            if (updateError) {
+                console.error("Payment data save error (resume):", updateError.message);
+                throw new Error("اطلاعات پرداخت سفارش در دیتابیس ذخیره نشد.");
+            }
+
+            return res.json({ success: true, payment: { paymentUrl: String(paymentUrl) } });
+        } catch (paymentError) {
+            console.error("Aban invoice error (resume):", paymentError.message, paymentError.payload || "");
+            const status = [401, 402, 403, 409, 410, 422, 429, 503].includes(paymentError.status)
+                ? paymentError.status
+                : 502;
+            return res.status(status).json({
+                success: false,
+                code: paymentError.code || "aban_invoice_failed",
+                message: paymentError.message || "ادامه‌ی پرداخت ناموفق بود."
+            });
+        }
+    } catch (error) {
+        console.error("Order resume error:", error.message);
+        return res.status(500).json({ success: false, message: "خطا در ادامه‌ی پرداخت سفارش." });
     }
 });
 
